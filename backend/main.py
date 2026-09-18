@@ -21,6 +21,7 @@ from backend.sample_data import (
     get_scenario_scanning,
     get_scenario_ssh_brute_force,
 )
+from backend.live_scanner import live_scanner
 from backend.timeline import build_attack_timeline
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
@@ -32,6 +33,8 @@ async def lifespan(app: FastAPI):
     database.init_db()
     ensure_log_dirs()
     yield
+    # Stop background scanner on shutdown
+    live_scanner.stop()
 
 
 app = FastAPI(
@@ -65,12 +68,73 @@ def serve_dashboard():
 def get_system_status():
     incidents = database.get_all_incidents()
     events = database.get_all_events(limit=1000)
+    scan_status = live_scanner.get_status()
     return {
         "status": "online",
         "total_events": len(events),
         "total_incidents": len(incidents),
         "open_incidents": len([i for i in incidents if i.status not in (IncidentStatus.RESOLVED, IncidentStatus.FALSE_POSITIVE)]),
+        "scanner": scan_status,
     }
+
+
+@app.post("/api/scan/start")
+def start_live_scan():
+    live_scanner.start()
+    return {"message": "Live network traffic monitoring started on your system.", "status": live_scanner.get_status()}
+
+
+@app.post("/api/scan/stop")
+def stop_live_scan():
+    live_scanner.stop()
+    return {"message": "Live network traffic monitoring stopped.", "status": live_scanner.get_status()}
+
+
+@app.get("/api/scan/status")
+def get_live_scan_status():
+    return live_scanner.get_status()
+
+
+@app.post("/api/scan/snapshot")
+def take_scan_snapshot():
+    events = live_scanner.scan_once()
+    incidents = correlate_events()
+    return {
+        "message": f"Scanned live network connections. Captured {len(events)} telemetry events and checked intrusion rules.",
+        "events_count": len(events),
+        "incidents_count": len(incidents),
+        "incidents": incidents,
+    }
+
+
+@app.get("/api/system/connections")
+def get_active_system_connections(limit: int = 50):
+    """Returns real-time active network connections with process context."""
+    import psutil
+    conns = []
+    try:
+        raw_conns = psutil.net_connections(kind="inet")
+        for c in raw_conns:
+            if not c.raddr:
+                continue
+            proc_name = "Unknown"
+            if c.pid:
+                try:
+                    proc_name = psutil.Process(c.pid).name()
+                except Exception:
+                    proc_name = f"PID-{c.pid}"
+            conns.append({
+                "local_ip": c.laddr.ip if c.laddr else "*",
+                "local_port": c.laddr.port if c.laddr else 0,
+                "remote_ip": c.raddr.ip,
+                "remote_port": c.raddr.port,
+                "status": c.status or "UNKNOWN",
+                "pid": c.pid,
+                "process_name": proc_name,
+            })
+    except Exception as e:
+        print(f"Error reading connections: {e}")
+    return conns[:limit]
 
 
 class IngestRequest(BaseModel):
