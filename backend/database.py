@@ -1,26 +1,48 @@
 import json
 import sqlite3
-from typing import Any, Dict, List, Optional
+from contextlib import contextmanager
+from typing import Any, Dict, Generator, List, Optional
 from backend.config import DB_PATH
 from backend.models import (
     EvidenceItem,
     Incident,
     IncidentStatus,
     NormalizedEvent,
+    NotificationItem,
     RecommendationItem,
     SeverityLevel,
     ThreatCategory,
+    ThreatDomain,
 )
 
 
-def get_connection() -> sqlite3.Connection:
+@contextmanager
+def db_session() -> Generator[sqlite3.Connection, None, None]:
+    """Context manager ensuring transactions are committed and connections cleanly closed."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
+
+
+def _ensure_columns(conn: sqlite3.Connection, table_name: str, expected_columns: Dict[str, str]) -> None:
+    """Auto-migrates existing tables to add any newly introduced columns."""
+    cursor = conn.cursor()
+    cursor.execute(f"PRAGMA table_info({table_name})")
+    existing = {row["name"] for row in cursor.fetchall()}
+    for col_name, col_type in expected_columns.items():
+        if col_name not in existing:
+            try:
+                cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type}")
+            except Exception as e:
+                print(f"Migration note for {table_name}.{col_name}: {e}")
 
 
 def init_db() -> None:
-    with get_connection() as conn:
+    with db_session() as conn:
         cursor = conn.cursor()
 
         # Events table
@@ -30,20 +52,52 @@ def init_db() -> None:
                 id TEXT PRIMARY KEY,
                 timestamp TEXT NOT NULL,
                 source TEXT NOT NULL,
+                domain TEXT DEFAULT 'Network',
                 event_type TEXT NOT NULL,
                 src_ip TEXT,
                 src_port INTEGER,
                 dst_ip TEXT,
                 dst_port INTEGER,
                 protocol TEXT,
-                domain TEXT,
+                domain_name TEXT,
                 severity INTEGER DEFAULT 0,
                 signature TEXT,
                 flow_id TEXT,
                 sensor_id TEXT,
+                agent_id TEXT,
+                agent_name TEXT,
+                rule_id TEXT,
+                rule_level INTEGER,
+                user TEXT,
+                process_name TEXT,
+                process_path TEXT,
+                process_cmdline TEXT,
+                process_pid INTEGER,
+                file_path TEXT,
+                mitre_json TEXT,
                 raw_json TEXT
             )
             """
+        )
+
+        _ensure_columns(
+            conn,
+            "events",
+            {
+                "domain": "TEXT DEFAULT 'Network'",
+                "domain_name": "TEXT",
+                "agent_id": "TEXT",
+                "agent_name": "TEXT",
+                "rule_id": "TEXT",
+                "rule_level": "INTEGER",
+                "user": "TEXT",
+                "process_name": "TEXT",
+                "process_path": "TEXT",
+                "process_cmdline": "TEXT",
+                "process_pid": "INTEGER",
+                "file_path": "TEXT",
+                "mitre_json": "TEXT",
+            },
         )
 
         # Incidents table
@@ -53,20 +107,39 @@ def init_db() -> None:
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
                 description TEXT,
+                domain TEXT DEFAULT 'Cross-Domain',
                 status TEXT NOT NULL,
                 severity TEXT NOT NULL,
                 risk_score INTEGER NOT NULL,
                 confidence INTEGER NOT NULL,
                 threat_category TEXT NOT NULL,
+                indicators TEXT,
                 affected_assets TEXT,
+                affected_users TEXT,
+                affected_processes TEXT,
                 source_entities TEXT,
                 destination_entities TEXT,
+                mitre_tags TEXT,
                 first_seen TEXT,
                 last_seen TEXT,
                 created_at TEXT,
-                updated_at TEXT
+                updated_at TEXT,
+                is_contained INTEGER DEFAULT 0
             )
             """
+        )
+
+        _ensure_columns(
+            conn,
+            "incidents",
+            {
+                "domain": "TEXT DEFAULT 'Cross-Domain'",
+                "indicators": "TEXT",
+                "affected_users": "TEXT",
+                "affected_processes": "TEXT",
+                "mitre_tags": "TEXT",
+                "is_contained": "INTEGER DEFAULT 0",
+            },
         )
 
         # Incident to Events link table
@@ -128,156 +201,154 @@ def init_db() -> None:
             )
             """
         )
-        conn.commit()
+
+        # Notifications table
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notifications (
+                id TEXT PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                level TEXT NOT NULL,
+                title TEXT NOT NULL,
+                message TEXT NOT NULL,
+                incident_id TEXT,
+                domain TEXT DEFAULT 'General'
+            )
+            """
+        )
 
 
 def save_event(event: NormalizedEvent) -> None:
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            INSERT OR REPLACE INTO events (
-                id, timestamp, source, event_type, src_ip, src_port, dst_ip, dst_port,
-                protocol, domain, severity, signature, flow_id, sensor_id, raw_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                event.event_id,
-                event.timestamp,
-                event.source,
-                event.event_type,
-                event.src_ip,
-                event.src_port,
-                event.dst_ip,
-                event.dst_port,
-                event.protocol,
-                event.domain,
-                event.severity,
-                event.signature,
-                event.flow_id,
-                event.sensor_id,
-                json.dumps(event.raw_event or {}),
-            ),
-        )
-        conn.commit()
+    save_events_batch([event])
 
 
 def save_events_batch(events: List[NormalizedEvent]) -> None:
-    with get_connection() as conn:
+    with db_session() as conn:
         cursor = conn.cursor()
         for event in events:
+            mitre_data = {
+                "tactics": event.mitre_tactics,
+                "techniques": event.mitre_techniques,
+            }
             cursor.execute(
                 """
                 INSERT OR REPLACE INTO events (
-                    id, timestamp, source, event_type, src_ip, src_port, dst_ip, dst_port,
-                    protocol, domain, severity, signature, flow_id, sensor_id, raw_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    id, timestamp, source, domain, event_type, src_ip, src_port, dst_ip, dst_port,
+                    protocol, domain_name, severity, signature, flow_id, sensor_id,
+                    agent_id, agent_name, rule_id, rule_level, user, process_name,
+                    process_path, process_cmdline, process_pid, file_path, mitre_json, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event.event_id,
                     event.timestamp,
                     event.source,
+                    event.domain.value if isinstance(event.domain, ThreatDomain) else event.domain,
                     event.event_type,
                     event.src_ip,
                     event.src_port,
                     event.dst_ip,
                     event.dst_port,
                     event.protocol,
-                    event.domain,
+                    event.domain_name,
                     event.severity,
                     event.signature,
                     event.flow_id,
                     event.sensor_id,
+                    event.agent_id,
+                    event.agent_name,
+                    event.rule_id,
+                    event.rule_level,
+                    event.user,
+                    event.process_name,
+                    event.process_path,
+                    event.process_cmdline,
+                    event.process_pid,
+                    event.file_path,
+                    json.dumps(mitre_data),
                     json.dumps(event.raw_event or {}),
                 ),
             )
-        conn.commit()
 
 
 def get_all_events(limit: int = 500) -> List[NormalizedEvent]:
-    with get_connection() as conn:
+    with db_session() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM events ORDER BY timestamp DESC LIMIT ?", (limit,))
         rows = cursor.fetchall()
         result = []
         for r in rows:
             raw = json.loads(r["raw_json"]) if r["raw_json"] else {}
+            mitre = json.loads(r["mitre_json"]) if r["mitre_json"] else {}
             result.append(
                 NormalizedEvent(
                     event_id=r["id"],
                     timestamp=r["timestamp"],
                     source=r["source"],
+                    domain=ThreatDomain(r["domain"]) if r["domain"] in [d.value for d in ThreatDomain] else ThreatDomain.NETWORK,
                     event_type=r["event_type"],
                     src_ip=r["src_ip"],
                     src_port=r["src_port"],
                     dst_ip=r["dst_ip"],
                     dst_port=r["dst_port"],
                     protocol=r["protocol"],
-                    domain=r["domain"],
+                    domain_name=r["domain_name"],
                     severity=r["severity"],
                     signature=r["signature"],
                     flow_id=r["flow_id"],
                     sensor_id=r["sensor_id"],
+                    agent_id=r["agent_id"],
+                    agent_name=r["agent_name"],
+                    rule_id=r["rule_id"],
+                    rule_level=r["rule_level"],
+                    user=r["user"],
+                    process_name=r["process_name"],
+                    process_path=r["process_path"],
+                    process_cmdline=r["process_cmdline"],
+                    process_pid=r["process_pid"],
+                    file_path=r["file_path"],
+                    mitre_tactics=mitre.get("tactics", []),
+                    mitre_techniques=mitre.get("techniques", []),
                     raw_event=raw,
                 )
             )
         return result
 
 
-def get_event_by_id(event_id: str) -> Optional[NormalizedEvent]:
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM events WHERE id = ?", (event_id,))
-        r = cursor.fetchone()
-        if not r:
-            return None
-        raw = json.loads(r["raw_json"]) if r["raw_json"] else {}
-        return NormalizedEvent(
-            event_id=r["id"],
-            timestamp=r["timestamp"],
-            source=r["source"],
-            event_type=r["event_type"],
-            src_ip=r["src_ip"],
-            src_port=r["src_port"],
-            dst_ip=r["dst_ip"],
-            dst_port=r["dst_port"],
-            protocol=r["protocol"],
-            domain=r["domain"],
-            severity=r["severity"],
-            signature=r["signature"],
-            flow_id=r["flow_id"],
-            sensor_id=r["sensor_id"],
-            raw_event=raw,
-        )
-
-
 def save_incident(incident: Incident, event_ids: Optional[List[str]] = None) -> None:
-    with get_connection() as conn:
+    with db_session() as conn:
         cursor = conn.cursor()
         cursor.execute(
             """
             INSERT OR REPLACE INTO incidents (
-                id, title, description, status, severity, risk_score, confidence,
-                threat_category, affected_assets, source_entities, destination_entities,
-                first_seen, last_seen, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                id, title, description, domain, status, severity, risk_score, confidence,
+                threat_category, indicators, affected_assets, affected_users, affected_processes,
+                source_entities, destination_entities, mitre_tags, first_seen, last_seen,
+                created_at, updated_at, is_contained
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 incident.id,
                 incident.title,
                 incident.description,
+                incident.domain.value if isinstance(incident.domain, ThreatDomain) else incident.domain,
                 incident.status.value if isinstance(incident.status, IncidentStatus) else incident.status,
                 incident.severity.value if isinstance(incident.severity, SeverityLevel) else incident.severity,
                 incident.risk_score,
                 incident.confidence,
                 incident.threat_category.value if isinstance(incident.threat_category, ThreatCategory) else incident.threat_category,
+                json.dumps(incident.indicators),
                 json.dumps(incident.affected_assets),
+                json.dumps(incident.affected_users),
+                json.dumps(incident.affected_processes),
                 json.dumps(incident.source_entities),
                 json.dumps(incident.destination_entities),
+                json.dumps(incident.mitre_tags),
                 incident.first_seen,
                 incident.last_seen,
                 incident.created_at,
                 incident.updated_at,
+                1 if incident.is_contained else 0,
             ),
         )
 
@@ -290,22 +361,21 @@ def save_incident(incident: Incident, event_ids: Optional[List[str]] = None) -> 
                 """,
                 (incident.id, eid, "correlated"),
             )
-        conn.commit()
 
 
 def update_incident_status(incident_id: str, new_status: str) -> bool:
-    with get_connection() as conn:
+    with db_session() as conn:
         cursor = conn.cursor()
+        is_cont = 1 if new_status == IncidentStatus.CONTAINED.value else 0
         cursor.execute(
-            "UPDATE incidents SET status = ? WHERE id = ?",
-            (new_status, incident_id),
+            "UPDATE incidents SET status = ?, is_contained = max(is_contained, ?) WHERE id = ?",
+            (new_status, is_cont, incident_id),
         )
-        conn.commit()
         return cursor.rowcount > 0
 
 
 def get_all_incidents() -> List[Incident]:
-    with get_connection() as conn:
+    with db_session() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM incidents ORDER BY risk_score DESC, created_at DESC")
         rows = cursor.fetchall()
@@ -320,26 +390,32 @@ def get_all_incidents() -> List[Incident]:
                     id=r["id"],
                     title=r["title"],
                     description=r["description"] or "",
+                    domain=ThreatDomain(r["domain"]) if r["domain"] in [d.value for d in ThreatDomain] else ThreatDomain.CROSS_DOMAIN,
                     status=IncidentStatus(r["status"]),
                     severity=SeverityLevel(r["severity"]),
                     risk_score=r["risk_score"],
                     confidence=r["confidence"],
-                    threat_category=ThreatCategory(r["threat_category"]),
+                    threat_category=ThreatCategory(r["threat_category"]) if r["threat_category"] in [c.value for c in ThreatCategory] else ThreatCategory.UNKNOWN,
+                    indicators=json.loads(r["indicators"]) if r["indicators"] else [],
                     affected_assets=json.loads(r["affected_assets"]) if r["affected_assets"] else [],
+                    affected_users=json.loads(r["affected_users"]) if r["affected_users"] else [],
+                    affected_processes=json.loads(r["affected_processes"]) if r["affected_processes"] else [],
                     source_entities=json.loads(r["source_entities"]) if r["source_entities"] else [],
                     destination_entities=json.loads(r["destination_entities"]) if r["destination_entities"] else [],
+                    mitre_tags=json.loads(r["mitre_tags"]) if r["mitre_tags"] else [],
                     first_seen=r["first_seen"],
                     last_seen=r["last_seen"],
                     created_at=r["created_at"],
                     updated_at=r["updated_at"],
                     event_ids=ev_ids,
+                    is_contained=bool(r["is_contained"]),
                 )
             )
         return result
 
 
 def get_incident_by_id(incident_id: str) -> Optional[Incident]:
-    with get_connection() as conn:
+    with db_session() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM incidents WHERE id = ?", (incident_id,))
         r = cursor.fetchone()
@@ -354,24 +430,30 @@ def get_incident_by_id(incident_id: str) -> Optional[Incident]:
             id=r["id"],
             title=r["title"],
             description=r["description"] or "",
+            domain=ThreatDomain(r["domain"]) if r["domain"] in [d.value for d in ThreatDomain] else ThreatDomain.CROSS_DOMAIN,
             status=IncidentStatus(r["status"]),
             severity=SeverityLevel(r["severity"]),
             risk_score=r["risk_score"],
             confidence=r["confidence"],
-            threat_category=ThreatCategory(r["threat_category"]),
+            threat_category=ThreatCategory(r["threat_category"]) if r["threat_category"] in [c.value for c in ThreatCategory] else ThreatCategory.UNKNOWN,
+            indicators=json.loads(r["indicators"]) if r["indicators"] else [],
             affected_assets=json.loads(r["affected_assets"]) if r["affected_assets"] else [],
+            affected_users=json.loads(r["affected_users"]) if r["affected_users"] else [],
+            affected_processes=json.loads(r["affected_processes"]) if r["affected_processes"] else [],
             source_entities=json.loads(r["source_entities"]) if r["source_entities"] else [],
             destination_entities=json.loads(r["destination_entities"]) if r["destination_entities"] else [],
+            mitre_tags=json.loads(r["mitre_tags"]) if r["mitre_tags"] else [],
             first_seen=r["first_seen"],
             last_seen=r["last_seen"],
             created_at=r["created_at"],
             updated_at=r["updated_at"],
             event_ids=ev_ids,
+            is_contained=bool(r["is_contained"]),
         )
 
 
 def get_incident_events(incident_id: str) -> List[NormalizedEvent]:
-    with get_connection() as conn:
+    with db_session() as conn:
         cursor = conn.cursor()
         cursor.execute(
             """
@@ -386,22 +468,36 @@ def get_incident_events(incident_id: str) -> List[NormalizedEvent]:
         result = []
         for r in rows:
             raw = json.loads(r["raw_json"]) if r["raw_json"] else {}
+            mitre = json.loads(r["mitre_json"]) if r["mitre_json"] else {}
             result.append(
                 NormalizedEvent(
                     event_id=r["id"],
                     timestamp=r["timestamp"],
                     source=r["source"],
+                    domain=ThreatDomain(r["domain"]) if r["domain"] in [d.value for d in ThreatDomain] else ThreatDomain.NETWORK,
                     event_type=r["event_type"],
                     src_ip=r["src_ip"],
                     src_port=r["src_port"],
                     dst_ip=r["dst_ip"],
                     dst_port=r["dst_port"],
                     protocol=r["protocol"],
-                    domain=r["domain"],
+                    domain_name=r["domain_name"],
                     severity=r["severity"],
                     signature=r["signature"],
                     flow_id=r["flow_id"],
                     sensor_id=r["sensor_id"],
+                    agent_id=r["agent_id"],
+                    agent_name=r["agent_name"],
+                    rule_id=r["rule_id"],
+                    rule_level=r["rule_level"],
+                    user=r["user"],
+                    process_name=r["process_name"],
+                    process_path=r["process_path"],
+                    process_cmdline=r["process_cmdline"],
+                    process_pid=r["process_pid"],
+                    file_path=r["file_path"],
+                    mitre_tactics=mitre.get("tactics", []),
+                    mitre_techniques=mitre.get("techniques", []),
                     raw_event=raw,
                 )
             )
@@ -409,7 +505,7 @@ def get_incident_events(incident_id: str) -> List[NormalizedEvent]:
 
 
 def save_evidence_batch(evidence_list: List[EvidenceItem]) -> None:
-    with get_connection() as conn:
+    with db_session() as conn:
         cursor = conn.cursor()
         for ev in evidence_list:
             cursor.execute(
@@ -428,11 +524,10 @@ def save_evidence_batch(evidence_list: List[EvidenceItem]) -> None:
                     ev.description,
                 ),
             )
-        conn.commit()
 
 
 def get_incident_evidence(incident_id: str) -> List[EvidenceItem]:
-    with get_connection() as conn:
+    with db_session() as conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT * FROM evidence WHERE incident_id = ? ORDER BY timestamp ASC",
@@ -454,7 +549,7 @@ def get_incident_evidence(incident_id: str) -> List[EvidenceItem]:
 
 
 def save_recommendations_batch(rec_list: List[RecommendationItem]) -> None:
-    with get_connection() as conn:
+    with db_session() as conn:
         cursor = conn.cursor()
         for rec in rec_list:
             cursor.execute(
@@ -472,11 +567,10 @@ def save_recommendations_batch(rec_list: List[RecommendationItem]) -> None:
                     rec.status,
                 ),
             )
-        conn.commit()
 
 
 def get_incident_recommendations(incident_id: str) -> List[RecommendationItem]:
-    with get_connection() as conn:
+    with db_session() as conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT * FROM recommendations WHERE incident_id = ? ORDER BY priority DESC",
@@ -498,9 +592,8 @@ def get_incident_recommendations(incident_id: str) -> List[RecommendationItem]:
 
 def save_report(incident_id: str, report_md: str, report_html: str, report_id: str) -> None:
     from datetime import datetime, timezone
-
     now = datetime.now(timezone.utc).isoformat()
-    with get_connection() as conn:
+    with db_session() as conn:
         cursor = conn.cursor()
         cursor.execute(
             """
@@ -510,11 +603,10 @@ def save_report(incident_id: str, report_md: str, report_html: str, report_id: s
             """,
             (report_id, incident_id, now, "INCIDENT_INVESTIGATION", report_md, report_html),
         )
-        conn.commit()
 
 
 def get_report(incident_id: str) -> Optional[Dict[str, Any]]:
-    with get_connection() as conn:
+    with db_session() as conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT * FROM reports WHERE incident_id = ? ORDER BY generated_at DESC LIMIT 1",
@@ -533,8 +625,48 @@ def get_report(incident_id: str) -> Optional[Dict[str, Any]]:
         }
 
 
+def save_notification(notif: NotificationItem) -> None:
+    with db_session() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO notifications (
+                id, timestamp, level, title, message, incident_id, domain
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                notif.id,
+                notif.timestamp,
+                notif.level,
+                notif.title,
+                notif.message,
+                notif.incident_id,
+                notif.domain,
+            ),
+        )
+
+
+def get_recent_notifications(limit: int = 50) -> List[NotificationItem]:
+    with db_session() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM notifications ORDER BY timestamp DESC LIMIT ?", (limit,))
+        rows = cursor.fetchall()
+        return [
+            NotificationItem(
+                id=r["id"],
+                timestamp=r["timestamp"],
+                level=r["level"],
+                title=r["title"],
+                message=r["message"],
+                incident_id=r["incident_id"],
+                domain=r["domain"],
+            )
+            for r in rows
+        ]
+
+
 def clear_all_data() -> None:
-    with get_connection() as conn:
+    with db_session() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM incident_events")
         cursor.execute("DELETE FROM evidence")
@@ -542,4 +674,4 @@ def clear_all_data() -> None:
         cursor.execute("DELETE FROM reports")
         cursor.execute("DELETE FROM incidents")
         cursor.execute("DELETE FROM events")
-        conn.commit()
+        cursor.execute("DELETE FROM notifications")

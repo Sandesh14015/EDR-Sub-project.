@@ -10,7 +10,7 @@ import psutil
 
 from backend import database
 from backend.correlation import correlate_events
-from backend.models import NormalizedEvent
+from backend.models import NormalizedEvent, ThreatDomain
 
 # Known high-risk or suspicious ports often used by C2 frameworks, trojans, or cleartext protocols
 SUSPICIOUS_PORTS = {
@@ -185,7 +185,8 @@ class LiveNetworkScanner:
                 dst_ip=dst_ip,
                 dst_port=dst_port,
                 protocol=proto,
-                domain=None,
+                domain=ThreatDomain.NETWORK,
+                domain_name=None,
                 severity=1,
                 signature=f"Connection [{status}] by {proc_name} -> {dst_ip}:{dst_port}",
                 flow_id=f"PID_{conn.pid}_{conn.fd or '0'}",
