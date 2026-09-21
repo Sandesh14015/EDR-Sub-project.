@@ -1,120 +1,48 @@
-# CYBERGUARD Detection Module (EDR / XDR Sub-Project)
+# WayTrace
 
-The **CYBERGUARD Detection Module** is the core endpoint and network detection and response engine within the **CYBERGUARD** security ecosystem.
+WayTrace is an endpoint and network detection console for Wazuh, Suricata, and
+Zeek telemetry. It combines normalized events into incidents with evidence,
+risk and confidence scores, investigation timelines, recommendations, reports,
+live host connection scanning, and active response.
 
-Built on **Wazuh 4.14.7** as the backbone and **Suricata** as the network IDS/IPS sensor (with optional **Zeek** network telemetry), the module normalizes, correlates, and responds to threats across 4 distinct domains.
+## Stack
 
-> **"Wazuh monitors the endpoint. Suricata guards the network. CYBERGUARD correlates multi-domain telemetry and executes active response."**
+- Frontend: plain HTML, CSS, and JavaScript served by Express. No build step is required.
+- Backend: Node.js 20+ and Express 5.
+- Storage: SQLite via `better-sqlite3`.
+- Host telemetry: `systeminformation`.
+- Tests: Node's built-in test runner.
 
----
+## Run
 
-## 🏗️ Architectural Overview
-
-```
-                         CYBERGUARD
-                      Detection MODULE 
-
-       ┌─────────────────────────────────────┐
-       │             ENDPOINT                │
-       │                                     │
-       │         Wazuh 4.14.7 Agent          │
-       │              │                      │
-       │        ┌─────┼─────────┐            │
-       │        │     │         │            │
-       │       Logs   FIM    Inventory       │
-       │        │     │         │            │
-       │        └─────┼─────────┘            │
-       │              │                      │
-       └──────────────┼──────────────────────┘
-                      │
-                      │
- Network ────────► Suricata ───► eve.json
-                      │
-                      ▼
-       ┌─────────────────────────────────────┐
-       │     CYBERGUARD Detection Engine     │
-       │                                     │
-       │  1. Ingestion Adapter               │
-       │  2. Multi-Domain Normalizer         │
-       │  3. Correlation & Clustering        │
-       │  4. Evidence Extraction             │
-       │  5. Risk & Confidence Scoring       │
-       │  6. Active Response IPS             │
-       │  7. Real-Time Notification Stream   │
-       └─────────────────────────────────────┘
+```powershell
+npm install
+npm start
 ```
 
----
+Open the dashboard at http://127.0.0.1:8000 and interactive API docs at
+http://127.0.0.1:8000/docs. For development, use `npm run dev`. Set `PORT`,
+`HOST`, or `WAYTRACE_DB_PATH` as needed. Runtime SQLite files are created in
+`data/` and are excluded from version control.
 
-## 🎯 4 Core Threat Domains
+## Test
 
-1. **Authentication Attacks**:
-   - Repeated failed logins
-   - Brute force & password spraying
-   - Suspicious successful logins following failed attempts
-   - Unusual source IPs and devices
-2. **Endpoint Attacks**:
-   - Suspicious processes & command lines (`powershell.exe`, `mimikatz`, `certutil.exe`)
-   - Malware execution indicators
-   - Unauthorized file modifications via Wazuh FIM Syscheck
-   - Persistence mechanisms (registry keys, scheduled tasks)
-3. **Network Attacks**:
-   - Port scans & service sweeps
-   - Exploit traffic & malicious connections
-   - C2 communication & beaconing
-   - Suspicious DNS anomalies
-   - Suricata IDS/IPS signatures
-4. **Application Activity**:
-   - Web login events & brute force
-   - API abuse & rate limiting violations
-   - HTTP 401/403 authorization failures
-   - Suspicious application behaviors
-
----
-
-## 🔄 The 5-Stage Detection Pipeline
-
-$$\text{Event} \longrightarrow \text{Evidence} \longrightarrow \text{Classification} \longrightarrow \text{Confidence / Risk} \longrightarrow \text{Notification}$$
-
-1. **Event**: Ingests alerts from Wazuh 4.14.7, Suricata EVE, Zeek, or live Windows socket monitors.
-2. **Evidence**: Extracts and links corroborating artifacts (logon records, modified file paths, IDS rules) into an immutable evidence store.
-3. **Classification**: Maps incidents to MITRE ATT&CK techniques and threat categories (e.g. *Possible Account Compromise*).
-4. **Confidence / Risk**: Decoupled scoring calculating Risk (0–100) and Confidence (0–100%) based on multi-sensor agreement.
-5. **Notification & Active Response**: Pushes instant notifications to analysts and triggers Active Response IPS actions (Windows Firewall IP block, taskkill process termination).
-
----
-
-## 🚀 Quick Start
-
-### 1. Requirements & Installation
-Requires Python 3.10+:
-```bash
-pip install -r requirements.txt
+```powershell
+npm test
 ```
 
-### 2. Start CYBERGUARD
-```bash
-python run.py
-```
-- **Web Dashboard**: [http://127.0.0.1:8000](http://127.0.0.1:8000)
-- **REST API & Swagger Docs**: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+The tests use a temporary SQLite database. The dashboard's scenario buttons
+exercise account compromise, password spraying, endpoint persistence,
+application abuse, and command and control activity.
 
----
+## Ingest
 
-## 🧪 Running the Test Suite
+Send newline-delimited JSON or a JSON array to `POST /api/ingest` as
+`{"raw_data":"..."}`. Direct Wazuh and Suricata webhooks are available at
+`POST /api/adapter/wazuh` and `POST /api/adapter/suricata`.
 
-Run the full automated test suite covering end-to-end multi-domain attacks, Active Response IPS, and live network scanning:
-```bash
-python -m unittest discover tests
-```
-*12 out of 12 tests pass cleanly.*
+The live scanner reads the host's visible sockets. Operating system permissions
+can limit process details and firewall response. Blocking or terminating a
+process is performed only when the respective API command is invoked.
 
----
-
-## 🛡️ Active Response IPS API
-
-- `POST /api/ips/block`: Block an offending IP address in Windows Firewall via `netsh advfirewall`.
-- `POST /api/ips/unblock`: Remove a temporary firewall block rule.
-- `POST /api/ips/terminate`: Terminate an active malicious process by PID or name.
-- `GET /api/notifications`: Retrieve real-time CYBERGUARD incident notifications.
-- `GET /api/cyberguard/feed`: Complete normalized telemetry and incident feed.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for module and data flow details.
