@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>CYBERGUARD — Detection Module (EDR / XDR)</title>
+  <title>WayTrace | Detection Console</title>
   <style>
     /* Clean, Simple, Pure White Background Theme */
     * {
@@ -101,13 +101,27 @@
     /* Grid Layout */
     .layout-grid {
       display: grid;
-      grid-template-columns: 1.05fr 1.2fr;
+      grid-template-columns: minmax(0, 1.05fr) minmax(0, 1.2fr);
       gap: 24px;
     }
+    .layout-grid > div, .card, .card-header > div { min-width: 0; }
+    #incidentsList, #connectionsList, #evidenceContainer { overflow-x: auto; }
     @media (max-width: 1024px) {
       .layout-grid {
-        grid-template-columns: 1fr;
+        grid-template-columns: minmax(0, 1fr);
       }
+    }
+    .mobile-domain { display: none; }
+    @media (max-width: 600px) {
+      body { padding: 16px; }
+      .card { padding: 14px; }
+      .card-header { gap: 10px; }
+      .tab-bar { overflow-x: auto; }
+      .tab-bar button { white-space: nowrap; }
+      #incidentsList th:nth-child(1), #incidentsList td:nth-child(1),
+      #incidentsList th:nth-child(2), #incidentsList td:nth-child(2) { display: none; }
+      #incidentsList th, #incidentsList td { padding: 6px; }
+      #incidentsList .mobile-domain { display: block; margin-top: 4px; }
     }
 
     /* Cards */
@@ -322,7 +336,7 @@
   <header>
     <div>
       <div class="brand-title">
-        🛡️ CYBERGUARD <span class="brand-badge">Detection Module (EDR)</span>
+        🛡️ WayTrace <span class="brand-badge">Detection Console</span>
       </div>
       <div class="subtitle">Wazuh Backbone (Host/FIM/Auth) • Suricata Network Sensor • Intelligent Threat Correlator</div>
     </div>
@@ -337,10 +351,17 @@
   <div class="notif-feed">
     <div style="display: flex; align-items: center;">
       <span class="notif-pulse"></span>
-      <span id="latestNotifText"><strong>CYBERGUARD Notification Feed:</strong> All systems normal. Listening for security alerts...</span>
+      <span id="latestNotifText"><strong>WayTrace Notification Feed:</strong> All systems normal. Listening for security alerts...</span>
     </div>
     <button style="padding: 2px 8px; font-size: 11px;" onclick="fetchNotifications()">View All</button>
   </div>
+  <dialog id="notificationsDialog" style="width:min(520px, calc(100% - 32px)); max-height:70vh; margin:auto; padding:18px; border:1px solid #cbd5e1; border-radius:8px; box-shadow:0 12px 36px #0f172a33;">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+      <h2 style="font-size:16px;">Notifications</h2>
+      <button onclick="document.getElementById('notificationsDialog').close()" aria-label="Close notifications">Close</button>
+    </div>
+    <div id="notificationsList" style="overflow:auto; max-height:55vh;"></div>
+  </dialog>
 
   <div id="noticeBox" class="alert-notice"></div>
 
@@ -551,6 +572,21 @@
       setTimeout(() => { box.className = "alert-notice"; }, 4000);
     }
 
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]);
+    }
+
+    async function fetchNotifications() {
+      try {
+        const res = await fetch("/api/notifications?limit=50");
+        const items = await res.json();
+        document.getElementById("notificationsList").innerHTML = items.length ? items.map(item =>
+          `<div style="padding:8px 0; border-bottom:1px solid #e2e8f0;"><strong>${escapeHtml(item.level)}: ${escapeHtml(item.title)}</strong><div style="font-size:12px; color:#475569;">${escapeHtml(item.message)}</div><small>${escapeHtml(item.timestamp)}</small></div>`
+        ).join("") : '<p style="font-size:13px; color:#64748b;">No notifications yet.</p>';
+        document.getElementById("notificationsDialog").showModal();
+      } catch (err) { showNotice("Could not load notifications: " + err); }
+    }
+
     async function updateStats() {
       try {
         const res = await fetch("/api/status");
@@ -561,7 +597,7 @@
 
         if (data.recent_notifications && data.recent_notifications.length > 0) {
           const top = data.recent_notifications[0];
-          document.getElementById("latestNotifText").innerHTML = `<strong>${top.level}:</strong> ${top.title} — ${top.message}`;
+          document.getElementById("latestNotifText").innerHTML = `<strong>${escapeHtml(top.level)}:</strong> ${escapeHtml(top.title)} — ${escapeHtml(top.message)}`;
         }
       } catch (err) {
         console.error(err);
@@ -624,10 +660,10 @@
           <tbody>`;
         for (const inc of list) {
           html += `<tr>
-            <td><strong>${inc.id}</strong></td>
+            <td><strong>${escapeHtml(inc.id)}</strong></td>
             <td>${getDomainBadge(inc.domain)}</td>
-            <td>${inc.threat_category}</td>
-            <td>${getSeverityBadge(inc.severity)} <strong>${inc.risk_score}</strong>/100</td>
+            <td>${escapeHtml(inc.threat_category)}<span class="mobile-domain">${getDomainBadge(inc.domain)}</span></td>
+            <td>${getSeverityBadge(inc.severity)} <strong>${escapeHtml(inc.risk_score)}</strong>/100</td>
             <td><button style="padding: 2px 8px; font-size: 11px;" onclick="inspectIncident('${inc.id}')">Inspect</button></td>
           </tr>`;
         }
@@ -650,7 +686,9 @@
         document.getElementById("workspaceTitle").innerText = `Threat Analysis: ${inc.title}`;
         document.getElementById("severityBadge").innerHTML = getSeverityBadge(inc.severity);
 
-        document.getElementById("domainTag").outerHTML = getDomainBadge(inc.domain);
+        const domainTag = document.getElementById("domainTag");
+        domainTag.className = "badge " + ({ Authentication: "domain-auth", Endpoint: "domain-endpoint", Network: "domain-network", Application: "domain-app" }[inc.domain] || "domain-cross");
+        domainTag.textContent = inc.domain || "Cross-Domain";
         document.getElementById("containedTag").style.display = inc.is_contained ? "inline-block" : "none";
 
         document.getElementById("incTitle").innerText = inc.title;
@@ -666,7 +704,7 @@
         // MITRE Tags
         const mContainer = document.getElementById("mitreContainer");
         if (inc.mitre_tags && inc.mitre_tags.length > 0) {
-          mContainer.innerHTML = inc.mitre_tags.map(t => `<span class="badge badge-moderate">${t}</span>`).join(" ");
+          mContainer.innerHTML = inc.mitre_tags.map(t => `<span class="badge badge-moderate">${escapeHtml(t)}</span>`).join(" ");
         } else {
           mContainer.innerHTML = "";
         }
@@ -678,9 +716,9 @@
           for (const t of data.timeline) {
             tHtml += `
               <div class="timeline-entry ${t.is_inferred ? 'inferred' : ''}">
-                <div class="timeline-time">${t.timestamp} | ${t.source} ${t.is_inferred ? '<span class="inferred-tag">Inferred Hypothesis</span>' : ''}</div>
-                <div class="timeline-title">${t.stage}</div>
-                <div class="timeline-desc">${t.description}</div>
+                <div class="timeline-time">${escapeHtml(t.timestamp)} | ${escapeHtml(t.source)} ${t.is_inferred ? '<span class="inferred-tag">Inferred Hypothesis</span>' : ''}</div>
+                <div class="timeline-title">${escapeHtml(t.stage)}</div>
+                <div class="timeline-desc">${escapeHtml(t.description)}</div>
               </div>`;
           }
           tContainer.innerHTML = tHtml;
@@ -694,10 +732,10 @@
           let eHtml = `<table><thead><tr><th>Sensor</th><th>Proof Type</th><th>Forensic Value</th><th>Context</th></tr></thead><tbody>`;
           for (const ev of data.evidence) {
             eHtml += `<tr>
-              <td><strong>${ev.source}</strong></td>
-              <td>${ev.type}</td>
-              <td><code style="font-size:11px;">${ev.value}</code></td>
-              <td>${ev.description}</td>
+              <td><strong>${escapeHtml(ev.source)}</strong></td>
+              <td>${escapeHtml(ev.type)}</td>
+              <td><code style="font-size:11px;">${escapeHtml(ev.value)}</code></td>
+              <td>${escapeHtml(ev.description)}</td>
             </tr>`;
           }
           eHtml += `</tbody></table>`;
@@ -715,10 +753,10 @@
             rHtml += `
               <li style="margin-bottom: 10px; padding: 10px; border: 1px solid #e2e8f0; border-radius: 6px;">
                 <div style="display:flex; gap: 6px; align-items: center; margin-bottom: 2px;">
-                  <span class="badge ${badgeClass}">${r.priority}</span>
-                  <span style="font-size: 11px; font-weight: 700; color: #475569;">${r.category} Measure</span>
+                  <span class="badge ${badgeClass}">${escapeHtml(r.priority)}</span>
+                  <span style="font-size: 11px; font-weight: 700; color: #475569;">${escapeHtml(r.category)} Measure</span>
                 </div>
-                <div style="font-size: 12px; color: #0f172a;">${r.recommendation}</div>
+                <div style="font-size: 12px; color: #0f172a;">${escapeHtml(r.recommendation)}</div>
               </li>`;
           }
           rHtml += `</ul>`;
@@ -758,7 +796,7 @@
     }
 
     async function triggerKillProcess() {
-      const pidStr = prompt("Enter process PID to terminate (e.g. 5812):", "5812");
+      const pidStr = prompt("Enter process PID to terminate:", "");
       if (!pidStr) return;
       try {
         const res = await fetch("/api/ips/terminate", {
@@ -808,10 +846,10 @@
         let html = `<table><thead><tr><th>Process</th><th>Local</th><th>Remote Destination</th><th>Status</th></tr></thead><tbody>`;
         for (const c of conns) {
           html += `<tr>
-            <td><strong>${c.process_name}</strong> <span style="font-size:10px; color:#64748b;">(PID ${c.pid || '?'})</span></td>
-            <td><code>:${c.local_port}</code></td>
-            <td><code>${c.remote_ip}:${c.remote_port}</code></td>
-            <td><span style="font-size:11px; font-weight:600; color:#0284c7;">${c.status}</span></td>
+            <td><strong>${escapeHtml(c.process_name)}</strong> <span style="font-size:10px; color:#64748b;">(PID ${escapeHtml(c.pid || '?')})</span></td>
+            <td><code>:${escapeHtml(c.local_port)}</code></td>
+            <td><code>${escapeHtml(c.remote_ip)}:${escapeHtml(c.remote_port)}</code></td>
+            <td><span style="font-size:11px; font-weight:600; color:#0284c7;">${escapeHtml(c.status)}</span></td>
           </tr>`;
         }
         html += `</tbody></table>`;
@@ -875,7 +913,7 @@
     }
 
     async function clearAllData() {
-      if (!confirm("Reset all CYBERGUARD database tables?")) return;
+      if (!confirm("Reset all WayTrace database tables?")) return;
       await fetch("/api/clear", { method: "POST" });
       currentIncidentId = null;
       document.getElementById("incidentWorkspace").style.display = "none";
@@ -898,7 +936,7 @@
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `cyberguard_report_${currentIncidentId || 'threat'}.md`;
+      a.download = `waytrace_report_${currentIncidentId || 'threat'}.md`;
       a.click();
       URL.revokeObjectURL(url);
     }
