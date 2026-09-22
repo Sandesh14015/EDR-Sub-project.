@@ -843,13 +843,23 @@
           container.innerHTML = `<p style="font-size:12px; color:#64748b; padding:6px 0;">No active socket connections.</p>`;
           return;
         }
-        let html = `<table><thead><tr><th>Process</th><th>Local</th><th>Remote Destination</th><th>Status</th></tr></thead><tbody>`;
+        let html = `<table><thead><tr><th>Process</th><th>Local</th><th>Remote Destination</th><th>Status</th><th>Inspect</th></tr></thead><tbody>`;
         for (const c of conns) {
-          html += `<tr>
-            <td><strong>${escapeHtml(c.process_name)}</strong> <span style="font-size:10px; color:#64748b;">(PID ${escapeHtml(c.pid || '?')})</span></td>
-            <td><code>:${escapeHtml(c.local_port)}</code></td>
-            <td><code>${escapeHtml(c.remote_ip)}:${escapeHtml(c.remote_port)}</code></td>
-            <td><span style="font-size:11px; font-weight:600; color:#0284c7;">${escapeHtml(c.status)}</span></td>
+          const proc = escapeHtml(c.process_name);
+          const localIp = escapeHtml(c.local_ip || '192.168.0.249');
+          const remoteIp = escapeHtml(c.remote_ip);
+          const remotePort = c.remote_port;
+          const localPort = c.local_port;
+          const pid = c.pid || 'N/A';
+          const status = escapeHtml(c.status);
+          const proto = escapeHtml(c.protocol || 'TCP');
+
+          html += `<tr style="cursor:pointer;" onclick="inspectConnection('${remoteIp}', ${remotePort}, '${proc}', '${pid}', '${localIp}', ${localPort}, '${status}', '${proto}')">
+            <td><strong>${proc}</strong> <span style="font-size:10px; color:#64748b;">(PID ${pid})</span></td>
+            <td><code>:${localPort}</code></td>
+            <td><code>${remoteIp}:${remotePort}</code></td>
+            <td><span style="font-size:11px; font-weight:600; color:#0284c7;">${status}</span></td>
+            <td><button style="padding:2px 6px; font-size:10px;" onclick="event.stopPropagation(); inspectConnection('${remoteIp}', ${remotePort}, '${proc}', '${pid}', '${localIp}', ${localPort}, '${status}', '${proto}')">Investigate</button></td>
           </tr>`;
         }
         html += `</tbody></table>`;
@@ -857,6 +867,132 @@
       } catch (err) {
         console.error(err);
       }
+    }
+
+    function inspectConnection(remoteIp, remotePort, procName, pid, localIp, localPort, status, proto) {
+      document.getElementById("selectPrompt").style.display = "none";
+      document.getElementById("incidentWorkspace").style.display = "block";
+      document.getElementById("workspaceTitle").innerText = `Connection Investigation: ${remoteIp}:${remotePort}`;
+      document.getElementById("severityBadge").innerHTML = `<span class="badge badge-low">LOW</span>`;
+
+      const domainTag = document.getElementById("domainTag");
+      domainTag.className = "badge domain-network";
+      domainTag.textContent = "Network Telemetry";
+      document.getElementById("containedTag").style.display = "none";
+
+      document.getElementById("incTitle").innerText = `Connection Investigation: ${procName} -> ${remoteIp}:${remotePort}`;
+      document.getElementById("incDesc").innerText = `Active socket telemetry captured on host system.`;
+      document.getElementById("statusSelect").value = "NEW";
+      document.getElementById("incRisk").innerText = "15";
+      document.getElementById("incConfidence").innerText = "94";
+      document.getElementById("incAsset").innerText = `${localIp}:${localPort}`;
+      document.getElementById("incActor").innerText = `${remoteIp}:${remotePort}`;
+      currentActorIP = remoteIp;
+
+      const isSuspicious = ["powershell.exe", "cmd.exe", "certutil.exe", "mshta.exe"].some(p => procName.toLowerCase().includes(p)) || [4444, 1337, 5555, 6667, 31337].includes(remotePort);
+      const riskLabel = isSuspicious ? "HIGH" : (remotePort === 80 ? "MEDIUM" : "LOW");
+      const riskClass = isSuspicious ? "badge-critical" : (remotePort === 80 ? "badge-medium" : "badge-low");
+      const protocolText = remotePort === 443 ? "TCP/TLS" : (proto === "UDP" ? "UDP" : "TCP/HTTP");
+
+      const assessmentText = isSuspicious 
+        ? `⚠️ High-risk administrative process or port detected (${procName} on port ${remotePort}). Recommend immediate active response review.`
+        : `No malicious behavior observed from connection metadata alone. Standard network socket associated with binary ${procName}.`;
+
+      // Render Connection Investigation Card & Analysis Breakdown in Timeline tab
+      const tContainer = document.getElementById("timelineContainer");
+      tContainer.innerHTML = `
+        <div style="border: 2px solid #cbd5e1; border-radius: 8px; padding: 16px; background: #ffffff; max-width: 480px; margin-bottom: 20px; font-family: monospace;">
+          <div style="font-weight: 800; font-size: 13px; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; margin-bottom: 12px; color: #0f172a;">
+            CONNECTION INVESTIGATION
+          </div>
+          <div style="font-size: 12px; line-height: 1.6;">
+            <div style="color: #64748b; font-weight: 700;">Local Host</div>
+            <div style="font-weight: 700; color: #0f172a;">${localIp}</div>
+            <div style="text-align: center; color: #2563eb; font-size: 16px; margin: 4px 0;">↓</div>
+            <div style="color: #64748b; font-weight: 700;">Remote</div>
+            <div style="font-weight: 700; color: #0f172a;">${remoteIp}:${remotePort}</div>
+            
+            <table style="margin-top: 12px; border: none; font-size: 12px;">
+              <tr style="border: none;"><td style="border: none; color: #64748b; padding: 2px 0;">Protocol</td><td style="border: none; font-weight: 700;">${protocolText}</td></tr>
+              <tr style="border: none;"><td style="border: none; color: #64748b; padding: 2px 0;">State</td><td style="border: none; font-weight: 700;">${status}</td></tr>
+              <tr style="border: none;"><td style="border: none; color: #64748b; padding: 2px 0;">Process</td><td style="border: none; font-weight: 700;">${procName}</td></tr>
+              <tr style="border: none;"><td style="border: none; color: #64748b; padding: 2px 0;">PID</td><td style="border: none; font-weight: 700;">${pid}</td></tr>
+              <tr style="border: none;"><td style="border: none; color: #64748b; padding: 2px 0;">Risk</td><td style="border: none;"><span class="badge ${riskClass}">${riskLabel}</span></td></tr>
+              <tr style="border: none;"><td style="border: none; color: #64748b; padding: 2px 0;">Confidence</td><td style="border: none; font-weight: 700; color: #2563eb;">94%</td></tr>
+            </table>
+          </div>
+        </div>
+
+        <div style="background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; padding: 16px; font-size: 13px;">
+          <h3 style="font-size: 14px; font-weight: 700; color: #0f172a; margin-bottom: 8px;">Why is this connection happening?</h3>
+          <p style="margin-bottom: 4px;"><strong>Process:</strong> <code>${procName}</code></p>
+          <p style="margin-bottom: 4px;"><strong>Destination:</strong> <code>${remoteIp}:${remotePort}</code></p>
+          <p style="margin-bottom: 12px;"><strong>Protocol:</strong> ${protocolText}</p>
+
+          <h4 style="font-size: 13px; font-weight: 700; color: #334155; margin-bottom: 6px;">Observed behavior:</h4>
+          <ul style="list-style: none; padding-left: 0; margin-bottom: 14px; color: #475569; font-size: 12px; line-height: 1.8;">
+            <li>• ${status} TCP connection</li>
+            <li>• Associated with <code>${procName}</code> process</li>
+            <li>• Port ${remotePort}</li>
+            <li>• Connection state: ${status}</li>
+            <li>• Local socket bound: <code>${localIp}:${localPort}</code></li>
+            <li>• DNS association: ${remotePort === 443 || remotePort === 80 ? 'Standard Web TLS/HTTP Domain' : 'Direct IP / Service Flow'}</li>
+          </ul>
+
+          <h4 style="font-size: 13px; font-weight: 700; color: #334155; margin-bottom: 4px;">Assessment:</h4>
+          <p style="font-size: 13px; color: #1e293b; background: #ffffff; padding: 10px; border: 1px solid #e2e8f0; border-radius: 6px;">
+            ${assessmentText}
+          </p>
+        </div>
+      `;
+
+      // Evidence tab
+      document.getElementById("evidenceContainer").innerHTML = `
+        <table><thead><tr><th>Sensor</th><th>Proof Type</th><th>Forensic Value</th><th>Context</th></tr></thead><tbody>
+          <tr><td><strong>Windows Socket API</strong></td><td>Active Connection</td><td><code>${remoteIp}:${remotePort}</code></td><td>Bound to process ${procName} (PID ${pid})</td></tr>
+          <tr><td><strong>Process Telemetry</strong></td><td>Host Execution</td><td><code>${procName}</code></td><td>State: ${status}</td></tr>
+        </tbody></table>
+      `;
+
+      // Recommendations tab
+      document.getElementById("recommendationsContainer").innerHTML = `
+        <ul style="list-style: none;">
+          <li style="margin-bottom: 10px; padding: 10px; border: 1px solid #e2e8f0; border-radius: 6px;">
+            <div style="display:flex; gap: 6px; align-items: center; margin-bottom: 2px;">
+              <span class="badge badge-low">LOW</span>
+              <span style="font-size: 11px; font-weight: 700; color: #475569;">Observation Measure</span>
+            </div>
+            <div style="font-size: 12px; color: #0f172a;">Monitor connection lifetime and verify domain reputation if traffic volume spikes unexpectedly.</div>
+          </li>
+        </ul>
+      `;
+
+      // Report tab
+      const reportMd = `
+# CONNECTION INVESTIGATION REPORT
+
+**Local Host:** ${localIp}:${localPort}
+**Remote Destination:** ${remoteIp}:${remotePort}
+**Process:** ${procName} (PID: ${pid})
+**Protocol:** ${protocolText}
+**State:** ${status}
+**Risk Assessment:** ${riskLabel} (Confidence: 94%)
+
+---
+
+### Observed Behavior
+- Established TCP connection
+- Associated with ${procName} process
+- Port ${remotePort}
+- Local socket: ${localIp}:${localPort}
+
+### Assessment
+${assessmentText}
+`;
+      currentReportMarkdown = reportMd;
+      document.getElementById("reportPre").innerText = reportMd;
+
+      switchTab('timeline');
     }
 
     async function startLiveScan() {

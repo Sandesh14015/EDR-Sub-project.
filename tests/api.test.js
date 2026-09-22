@@ -78,6 +78,9 @@ test('raw ingest and webhook routes retain their response contracts', async () =
   assert.equal(suricata.data.events_ingested, 1);
   const wazuh = await request('/api/adapter/wazuh', 'POST', { rule: { level: 10, groups: ['authentication_failed'] }, agent: { name: 'host' }, data: { srcip: '203.0.113.7' } });
   assert.equal(wazuh.data.events_ingested, 1);
+  const csvData = "src_port,dst_port,protocol_type_TCP,label\n49152,80,True,1.0\n49153,443,True,0.0";
+  const csvIngest = await request('/api/ingest', 'POST', { raw_data: csvData });
+  assert.equal(csvIngest.data.events_count, 2);
   assert.equal((await request('/api/cyberguard/feed')).data.module, 'WAYTRACE_DETECTION');
   assert.equal((await request('/api/incidents/missing')).status, 404);
   assert.equal((await request('/api/scenarios/missing/load', 'POST')).status, 404);

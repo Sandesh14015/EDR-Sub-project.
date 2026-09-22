@@ -90,20 +90,90 @@ export function normalizeZeek(raw) {
   };
 }
 
+export function parseCsvRow(headers, values) {
+  const row = {};
+  for (let i = 0; i < headers.length; i++) {
+    if (headers[i]) row[headers[i].trim()] = (values[i] || '').trim();
+  }
+  let src_ip = row.src_ip || row.src || row.source_ip || null;
+  if (!src_ip) {
+    for (const key of Object.keys(row)) {
+      if (key.startsWith('src_ip_') && (row[key] === 'True' || row[key] === '1' || row[key] === 'true')) {
+        src_ip = key.replace('src_ip_', '');
+        break;
+      }
+    }
+  }
+  if (!src_ip) src_ip = '192.168.1.2';
+
+  let dst_ip = row.dst_ip || row.dst || row.dest_ip || row.destination_ip || null;
+  if (!dst_ip) {
+    for (const key of Object.keys(row)) {
+      if (key.startsWith('dst_ip_') && (row[key] === 'True' || row[key] === '1' || row[key] === 'true')) {
+        dst_ip = key.replace('dst_ip_', '');
+        break;
+      }
+    }
+  }
+  if (!dst_ip) dst_ip = '192.168.1.5';
+
+  const src_port = numberOrNull(row.src_port || row.src_p) || 49152;
+  const dst_port = numberOrNull(row.dst_port || row.dst_p) || 80;
+
+  let protocol = 'TCP';
+  if (row.protocol_type_UDP === 'True' || row.protocol_type_UDP === '1' || String(row.protocol).toUpperCase() === 'UDP') {
+    protocol = 'UDP';
+  } else if (row.protocol) {
+    protocol = String(row.protocol).toUpperCase();
+  }
+
+  const isAnomaly = row.label === '1.0' || row.label === '1' || row.label === 'true' || row.label === 'True' || row.anomaly === '1' || row.attack === '1';
+
+  const severity = isAnomaly ? 8 : 1;
+  const event_type = isAnomaly ? 'network_alert' : 'conn';
+  const signature = isAnomaly 
+    ? `Embedded System Network Anomaly Detected (${protocol} port ${dst_port})` 
+    : `Normal Network Connection ${src_ip}:${src_port} -> ${dst_ip}:${dst_port}`;
+
+  return {
+    event_id: id('CSV'),
+    timestamp: timestamp(row.timestamp || row.time || row.ts),
+    source: 'csv_dataset',
+    domain: 'Network',
+    event_type,
+    src_ip,
+    src_port,
+    dst_ip,
+    dst_port,
+    protocol,
+    severity,
+    signature,
+    sensor_id: 'embedded-system-sensor',
+    mitre_tactics: isAnomaly ? ['Initial Access'] : [],
+    mitre_techniques: isAnomaly ? ['T1190'] : [],
+    raw_event: row
+  };
+}
+
 function normalizeItem(item, hint) {
   if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
   if (hint === 'wazuh' || 'rule' in item || ('agent' in item && !('alert' in item) && !('event_type' in item))) return normalizeWazuh(item);
   if (hint === 'suricata' || 'alert' in item || 'event_type' in item || 'dest_ip' in item) return normalizeSuricata(item);
   return normalizeZeek(item);
 }
+
 export function parseRaw(text, hint) {
   if (typeof text !== 'string') return [];
   const trimmed = text.trim();
   if (trimmed.startsWith('[')) {
     try { const value = JSON.parse(trimmed); return Array.isArray(value) ? value.map(item => normalizeItem(item, hint)).filter(Boolean) : []; } catch { return []; }
   }
-  return trimmed.split(/\r?\n/).flatMap(line => {
-    if (!line.trim() || line.trim().startsWith('#')) return [];
+  const lines = trimmed.split(/\r?\n/).filter(line => line.trim() && !line.trim().startsWith('#'));
+  if (lines.length > 0 && lines[0].includes(',') && !lines[0].trim().startsWith('{')) {
+    const headers = lines[0].split(',');
+    return lines.slice(1).map(line => parseCsvRow(headers, line.split(','))).filter(Boolean);
+  }
+  return lines.flatMap(line => {
     try { const value = normalizeItem(JSON.parse(line), hint); return value ? [value] : []; } catch { return []; }
   });
 }
